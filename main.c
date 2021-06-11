@@ -13,8 +13,12 @@
  * can be compilled like `make main`
  * or
  * `gcc main.c -o hdd_stress_check`
+ * `gcc --std=c99 main.c -o hdd_stress_check`
  * 
  * tested on armv7l RPi4B (Debian 10.8 Linux 5.10.11) and INTEL x86_64 (Debian 9.13 Linux 4.9.0)
+ * compile under cygwin
+ * 
+ * TODO: log file. But different partition? log file path in ENV? (like ansimble)
  */
 
 #define _GNU_SOURCE
@@ -22,22 +26,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
-#include <sched.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <assert.h>
-#include <stdio_ext.h>
 #include <malloc.h>
 #include <limits.h>
 #include <fcntl.h>
-#include <fcntl.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
-#include <linux/random.h>
-#include <rpc/rpc_msg.h>
-#include <monetary.h>
 #include <getopt.h>
 
 
@@ -47,6 +44,7 @@ struct settings {
     int verbose;
     int direct_write;
     int direct_read;
+    int sync;
     int blk_mult;
     int f_num;
     unsigned long long bytes;
@@ -75,16 +73,22 @@ char * friendly_bytes(unsigned long long bytes) {
     static char formated[24] = {0}; //max ulong 18446744073709551615 = 20 chars
     const char* sf[5] = {"B", "KiB", "MiB", "GiB", "TiB"};
 
+    int k_limit = sizeof (sf) / sizeof (char*) - 1;
     int k = 0;
     long double ff = bytes;
-    while (ff >= 1024 && k < 5) {
+    while (ff >= 1024 && k < k_limit) {
         ff /= 1024;
         k += 1;
     }
-    if( snprintf(formated, sizeof (formated) - 1, "%.1Lf%s", ff, sf[k]) <0 ) {
-        formated[0]='?';
-        formated[1]='\0';
+
+    //zero precision for B, 1 for KiB, 2 for MiB, 3 for GiB, 4 for TiB
+    int ret = snprintf(formated, sizeof (formated) - 1, "%.*Lf%s", k, ff, sf[k]);
+
+    if (ret < 0 || ret >= sizeof (formated)) {
+        formated[0] = '?';
+        formated[1] = '\0';
     }
+
 
 
     //ignore crop?
@@ -96,7 +100,7 @@ char * friendly_bytes(unsigned long long bytes) {
 
 int fill_with_random(unsigned char *buf, size_t size) {
 
-
+    //Fantastic! but it works under cygwin
     FILE *fp;
     fp = fopen("/dev/urandom", "r");
     int ret = fread(buf, 1, size, fp);
@@ -190,8 +194,9 @@ int open_files(struct settings set, struct test_file *arr, int mode, mode_t mode
         arr[i].fd = open(arr[i].fname, mode, mode2);
 
         if (errno || arr[i].fd == 0) {
-            perror("open()");
-            if(set.f_num>1000)
+            int e=errno;
+            fprintf(stderr,"open(%i) faled code=%i '%s'\n",i,e,strerror(e));
+            if(e == EMFILE || e == ENFILE)
                 fprintf(stderr,"Check ulimits for 'nofile'\n");
             //exit(EXIT_FAILURE);
             return 1;
@@ -275,7 +280,9 @@ void print_stat(unsigned long long bytes, unsigned long long bytes_prev, __time_
     p_hr = p_hr % 24;
      */
 
-    fprintf(stderr, "%s %s %3liMib (%3li Mib/s), Total %9s (%3li Mib/s)%s%s\n"
+    //percentage of TOTAL_W to TOTAL_w ? how?
+    //chage hand made calc of Mib to friendly_bytes with strdupA() - stack mem will freed on print_stat exit
+    fprintf(stderr, "%s %s %3liMib (%3li Mib/s), Total %9s (%3li Mib/s)%s%s%s\n"
             , time_stamp(sec_total)//p_days,p_hr,p_min,p_sec
             , action
             , bytes_diff
@@ -284,6 +291,7 @@ void print_stat(unsigned long long bytes, unsigned long long bytes_prev, __time_
             , friendly_bytes(bytes)
             , bytes_MB_s
             , set.direct_write ? " D_W" : ""
+            , set.sync ? " S_W" : ""
             , set.direct_read ? " D_R" : ""
 
 
@@ -298,6 +306,7 @@ void help(char *msg) {
     printf("%s --f[iles-num] <N> [path/]\n"
             "Write random data across <N> files until free space or limit, then read all data back with compare\n"
             "\tOther options:\n"
+            "\t--sync\tO_SYNC when write\n"
             "\t--direct-r[ead]\t\tO_DIRECT when read (avoid pagecache)\n"
             "\t--direct-w[rite]\tO_DIRECT when write (avoid pagecache)\n"
             "\t--b[lksize-mult] <N>\tmultiply st_blksize of first target file to write/read at once\n"
@@ -324,6 +333,7 @@ struct settings get_settings(int argc, char** argv) {
 
     struct option long_options[] = {
         /* These options set a flag. */
+        {"sync", no_argument, &set.sync, 1},
         {"direct-read", no_argument, &set.direct_read, 1},
         {"direct-write", no_argument, &set.direct_write, 1},
         {"verbose", no_argument, &set.verbose, 1},
@@ -399,6 +409,9 @@ struct settings get_settings(int argc, char** argv) {
     if (set.direct_write)
         set.mode_w |= O_DIRECT;
 
+    if (set.sync)
+        set.mode_w |= O_SYNC;
+
     if (set.direct_read)
         set.mode_r |= O_DIRECT;
 
@@ -418,13 +431,14 @@ struct settings get_settings(int argc, char** argv) {
     }
 
 
-    fprintf(stderr, "%s: number of files %i, limit %s (%s), blksize multiply %i, O_DIRECT on write %s, O_DIRECT on read %s, path: %s\n"
+    fprintf(stderr, "%s: number of files %i, limit %s (%s), blksize multiply %i, O_DIRECT on write %s, O_SYNC on write %s, O_DIRECT on read %s, path: %s\n"
             , __progname
             , set.f_num
             , friendly_bytes(set.bytes)
             , set.bytes ? "LIMITED" : "!!! UNLIMITED WRITE !!!"
             , set.blk_mult
             , set.direct_write ? "YES" : "NO"
+            , set.sync ? "YES" : "NO"
             , set.direct_read ? "YES" : "NO"
             , strlen(set.path) ? set.path : "(current folder)"
 
