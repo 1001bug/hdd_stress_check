@@ -241,17 +241,17 @@ char * time_stamp(long _sec) {
 }
 
 void print_stat(unsigned long long bytes, unsigned long long bytes_prev, __time_t sec_start, __time_t sec_end, __time_t sec_prev, char * action, struct settings set) {
-    unsigned long bytes_diff = (bytes - bytes_prev) / (1024 * 1024);
-    unsigned long bytes_diff_s = 0;
+    unsigned long long bytes_cycle_diff = (bytes - bytes_prev);// / (1024 * 1024);
+    unsigned long long bytes_cycle_diff_s = 0;
 
-    unsigned long bytes_MB = bytes / (1024L * 1024L);
+    //unsigned long bytes_MB = bytes / (1024L * 1024L);
     //unsigned long bytes_GB = bytes_MB / 1024;
-    unsigned long bytes_MB_s = 0;
+    unsigned long long bytes_total_s = 0;
 
     __time_t sec_total = sec_end - sec_start;
 
     if (sec_total) {
-        bytes_MB_s = bytes_MB / sec_total;
+        bytes_total_s = bytes / sec_total;
     }
 
 
@@ -261,10 +261,32 @@ void print_stat(unsigned long long bytes, unsigned long long bytes_prev, __time_
 
 
     if (sec_cycle) {
-        bytes_diff_s = bytes_diff / sec_cycle;
+        bytes_cycle_diff_s = bytes_cycle_diff / sec_cycle;
     }
 
 
+    //calc done percent
+    //for unlimited write -1%
+    //for read after unlimited write - TOTAL_w to set.bytes
+    //for limited - both real
+    char * time_is = "Elpsd";
+    int prc = -1;
+    if (set.bytes) {
+        long double pp = (long double) bytes / (long double) set.bytes;
+        pp *= 100;
+        prc = (int) pp;
+
+
+        if (bytes_total_s) {
+            unsigned long long bytes_left_to = set.bytes - bytes;
+            //long double tt = (long double)set.bytes / (long double)bytes;
+            long double tt = (long double) bytes_left_to / (long double) bytes_total_s;
+
+            sec_total = (__time_t) tt; // * sec_total - sec_total;
+        }
+
+        time_is = "Estmt";
+    }
     /* int p_sec = sec_total;
     
    int p_min = p_sec / 60;
@@ -282,14 +304,16 @@ void print_stat(unsigned long long bytes, unsigned long long bytes_prev, __time_
 
     //percentage of TOTAL_W to TOTAL_w ? how?
     //chage hand made calc of Mib to friendly_bytes with strdupA() - stack mem will freed on print_stat exit
-    fprintf(stderr, "%s %s %3liMib (%3li Mib/s), Total %9s (%3li Mib/s)%s%s%s\n"
+    fprintf(stderr, "%s (%s) %s %9s (%9s/s), Total %9s (%9s/s) [%2i%%] %s%s%s\n"
             , time_stamp(sec_total)//p_days,p_hr,p_min,p_sec
+            , time_is
             , action
-            , bytes_diff
-            , bytes_diff_s
+            , strdupa(friendly_bytes(bytes_cycle_diff))
+            , strdupa(friendly_bytes(bytes_cycle_diff_s))
             //, action
-            , friendly_bytes(bytes)
-            , bytes_MB_s
+            , strdupa(friendly_bytes(bytes))
+            , strdupa(friendly_bytes(bytes_total_s))
+            , prc
             , set.direct_write ? " D_W" : ""
             , set.sync ? " S_W" : ""
             , set.direct_read ? " D_R" : ""
@@ -622,6 +646,10 @@ stop_write:
     }
 
 
+    //if write is UNLIMITED, cannot calc % done
+    //but for reading target is known
+    //bytes target for print_stat() while reading
+    set.bytes = TOTAL_w;
 
 
     //for stat
